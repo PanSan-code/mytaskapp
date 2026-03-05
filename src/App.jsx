@@ -1,5 +1,24 @@
-import { useState, useCallback, useRef } from "react";
+import { useState, useCallback, useRef, useEffect } from "react";
 import * as XLSX from "xlsx";
+import { db } from './firebase.js';
+import { collection, doc, setDoc, updateDoc, deleteDoc, onSnapshot } from 'firebase/firestore';
+// Cloudinary upload
+
+// ─── Cloudinary upload helper ─────────────────────────────────────────────────
+const CLOUDINARY_CLOUD = "dudnepxz5";
+const CLOUDINARY_PRESET = "ml_default";
+async function uploadFile(file) {
+  const fd = new FormData();
+  fd.append("file", file);
+  fd.append("upload_preset", CLOUDINARY_PRESET);
+  const res = await fetch(`https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD}/image/upload`, {
+    method: "POST", body: fd,
+  });
+  const data = await res.json();
+  if (!data.secure_url) throw new Error("Cloudinary upload failed");
+  return data.secure_url;
+}
+function newDocId(col) { return doc(collection(db, col)).id; }
 
 // ─── i18n ─────────────────────────────────────────────────────────────────────
 const T = {
@@ -338,13 +357,37 @@ select{background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/
 // ─── App ──────────────────────────────────────────────────────────────────────
 export default function App() {
   const [locale,setLocale]=useState("zh");
-  const t=T[locale];
   const [view,setView]=useState("user");
-  const [tasks,setTasks]=useState(makeSeedTasks);
-  const [submissions,setSubmissions]=useState(SEED_SUBS);
+  const [tasks,setTasks]=useState([]);
+  const [submissions,setSubmissions]=useState([]);
+  const [appLoading,setAppLoading]=useState(true);
   const [toast,setToast]=useState(null);
   const showToast=useCallback((msg,type="success")=>{setToast({msg,type});setTimeout(()=>setToast(null),2800);},[]);
-  const allClaims=tasks.flatMap(tk=>tk.photos.filter(p=>p.claimedBy).map(p=>({...p,taskId:tk.id,taskName:tk.name,taskNameEn:tk.nameEn})));
+
+  useEffect(()=>{
+    let first=true;
+    const u1=onSnapshot(collection(db,'tasks'),snap=>{
+      setTasks(snap.docs.map(d=>({id:d.id,...d.data(),photos:d.data().photos||[]})));
+      if(first){setAppLoading(false);first=false;}
+    },err=>{console.error(err);setAppLoading(false);});
+    const u2=onSnapshot(collection(db,'submissions'),snap=>{
+      setSubmissions(snap.docs.map(d=>({id:d.id,...d.data()})));
+    },err=>console.error(err));
+    return()=>{u1();u2();};
+  },[]);
+
+  const t=T[locale];
+  const allClaims=tasks.flatMap(tk=>(tk.photos||[]).filter(p=>p.claimedBy).map(p=>({...p,taskId:tk.id,taskName:tk.name,taskNameEn:tk.nameEn})));
+
+  if(appLoading) return(
+    <div style={{minHeight:"100vh",background:"var(--bg)",display:"flex",alignItems:"center",justifyContent:"center"}}>
+      <style>{CSS}</style>
+      <div style={{textAlign:"center"}}>
+        <div style={{fontSize:48,marginBottom:16}}>⏳</div>
+        <div style={{fontSize:14,color:"var(--text3)"}}>加载中…</div>
+      </div>
+    </div>
+  );
 
   return(
     <div style={{minHeight:"100vh",background:"var(--bg)"}}>
@@ -373,8 +416,8 @@ export default function App() {
       </header>
 
       {view==="user"
-        ?<UserView tasks={tasks} setTasks={setTasks} allClaims={allClaims} submissions={submissions} setSubmissions={setSubmissions} t={t} locale={locale} showToast={showToast}/>
-        :<AdminView tasks={tasks} setTasks={setTasks} allClaims={allClaims} submissions={submissions} setSubmissions={setSubmissions} t={t} locale={locale} showToast={showToast}/>}
+        ?<UserView tasks={tasks} allClaims={allClaims} submissions={submissions} t={t} locale={locale} showToast={showToast}/>
+        :<AdminView tasks={tasks} allClaims={allClaims} submissions={submissions} t={t} locale={locale} showToast={showToast}/>}
 
       {toast&&<div className={`toast toast-${toast.type}`}>{toast.msg}</div>}
     </div>
@@ -382,7 +425,7 @@ export default function App() {
 }
 
 // ─── UserView ─────────────────────────────────────────────────────────────────
-function UserView({tasks,setTasks,allClaims,submissions,setSubmissions,t,locale,showToast}){
+function UserView({tasks,allClaims,submissions,t,locale,showToast}){
   const [tab,setTab]=useState("tasks");
   const [detailId,setDetailId]=useState(null);
   const switchTab=useCallback((k)=>{setTab(k);setDetailId(null);},[]);
@@ -394,13 +437,13 @@ function UserView({tasks,setTasks,allClaims,submissions,setSubmissions,t,locale,
         <div className="page-inner">
           {tab==="tasks"&&detailId&&detailTask?(
             <div className="fade-in">
-              <TaskDetailTab task={detailTask} setTasks={setTasks} t={t} locale={locale} showToast={showToast} onBack={()=>setDetailId(null)}/>
+              <TaskDetailTab task={detailTask} tasks={tasks} t={t} locale={locale} showToast={showToast} onBack={()=>setDetailId(null)}/>
             </div>
           ):(
             <div className="fade-in" key={tab}>
               {tab==="tasks"&&<TaskListTab tasks={tasks} locale={locale} t={t} onView={setDetailId}/>}
               {tab==="my"&&<MyPhotosTab allClaims={allClaims} t={t} locale={locale}/>}
-              {tab==="submit"&&<SubmitTab tasks={tasks} submissions={submissions} setSubmissions={setSubmissions} t={t} locale={locale} showToast={showToast}/>}
+              {tab==="submit"&&<SubmitTab tasks={tasks} submissions={submissions} t={t} locale={locale} showToast={showToast}/>}
             </div>
           )}
         </div>
@@ -479,19 +522,26 @@ function TaskListTab({tasks,locale,t,onView}){
 }
 
 // ─── TaskDetailTab ────────────────────────────────────────────────────────────
-function TaskDetailTab({task,setTasks,t,locale,showToast,onBack}){
+function TaskDetailTab({task,tasks,t,locale,showToast,onBack}){
   const [claimTarget,setClaimTarget]=useState(null);
   const [email,setEmail]=useState("");
   const [emailError,setEmailError]=useState("");
   const openClaim=useCallback((id)=>{setClaimTarget(id);setEmail("");setEmailError("");},[]);
-  const handleClaim=useCallback(()=>{
+  const [claiming,setClaiming]=useState(false);
+  const handleClaim=useCallback(async()=>{
     if(!validateEmail(email)){setEmailError(t.emailInvalid);return;}
-    setTasks(prev=>prev.map(tk=>{
-      if(tk.id!==task.id)return tk;
-      return{...tk,photos:tk.photos.map(p=>p.id===claimTarget?{...p,claimedBy:email.trim().toLowerCase(),claimedAt:Date.now()}:p)};
-    }));
-    setClaimTarget(null);setEmail("");setEmailError("");showToast(t.claimSuccess);
-  },[email,claimTarget,task.id,setTasks,t,showToast]);
+    setClaiming(true);
+    try{
+      const latestTask=tasks.find(tk=>tk.id===task.id)||task;
+      const updatedPhotos=(latestTask.photos||[]).map(p=>
+        p.id===claimTarget?{...p,claimedBy:email.trim().toLowerCase(),claimedAt:Date.now()}:p
+      );
+      await updateDoc(doc(db,'tasks',task.id),{photos:updatedPhotos});
+      setClaimTarget(null);setEmail("");setEmailError("");
+      showToast(t.claimSuccess);
+    }catch(err){console.error(err);showToast("领取失败，请重试","error");}
+    setClaiming(false);
+  },[email,claimTarget,task,tasks,t,showToast]);
   const handleDownload=useCallback((p)=>{
     if(p.url){const a=document.createElement("a");a.href=p.url;a.download=p.name;a.click();}
     else showToast(`↓ ${p.name}`);
@@ -554,7 +604,7 @@ function TaskDetailTab({task,setTasks,t,locale,showToast,onBack}){
             </div>
             <div style={{display:"flex",gap:10,marginTop:4}}>
               <button className="btn btn-ghost" style={{flex:1}} onClick={()=>setClaimTarget(null)}>{t.btnCancel}</button>
-              <button className="btn btn-primary" style={{flex:2}} onClick={handleClaim}>{t.btnConfirmClaim}</button>
+              <button className="btn btn-primary" style={{flex:2}} onClick={handleClaim} disabled={claiming}>{claiming?"…":t.btnConfirmClaim}</button>
             </div>
           </div>
         </div>
@@ -587,7 +637,7 @@ function MyPhotosTab({allClaims,t,locale}){
 }
 
 // ─── SubmitTab ────────────────────────────────────────────────────────────────
-function SubmitTab({tasks,submissions,setSubmissions,t,locale,showToast}){
+function SubmitTab({tasks,submissions,t,locale,showToast}){
   const [email,setEmail]=useState("");
   const [taskId,setTaskId]=useState("");
   const [phone,setPhone]=useState("");
@@ -621,19 +671,24 @@ function SubmitTab({tasks,submissions,setSubmissions,t,locale,showToast}){
     return e;
   };
 
-  const handleSubmit=()=>{
+  const [submitting,setSubmitting]=useState(false);
+  const handleSubmit=async()=>{
     const e=validate();
     if(Object.keys(e).length>0){setErrors(e);return;}
-    setSubmissions(prev=>[...prev,{
-      id:uid(),email:emailNorm,taskId,note,
-      phone:phone.trim(),orderNo:orderNo.trim(),
-      claimedPhotoId:claimedPhotoInTask.id,
-      claimedPhotoName:claimedPhotoInTask.name,
-      workImageUrl:filePreview,workFileName:file.name,
-      submittedAt:Date.now()
-    }]);
-    setFile(null);setFilePreview(null);setNote("");setPhone("");setPhoneConfirm("");setOrderNo("");setErrors({});
-    showToast(t.submitSuccess);
+    setSubmitting(true);
+    try{
+      const subId=newDocId('submissions');
+      showToast("上传中…");
+      const workImageUrl=await uploadFile(file);
+      await setDoc(doc(db,'submissions',subId),{
+        email:emailNorm,taskId,note,phone:phone.trim(),orderNo:orderNo.trim(),
+        claimedPhotoId:claimedPhotoInTask.id,claimedPhotoName:claimedPhotoInTask.name,
+        workImageUrl,workFileName:file?.name||'',submittedAt:Date.now(),
+      });
+      setFile(null);setFilePreview(null);setNote("");setPhone("");setPhoneConfirm("");setOrderNo("");setErrors({});
+      showToast(t.submitSuccess);
+    }catch(err){console.error(err);showToast("提交失败，请重试","error");}
+    setSubmitting(false);
   };
 
   const stepDone=(n)=>{
@@ -747,9 +802,9 @@ function SubmitTab({tasks,submissions,setSubmissions,t,locale,showToast}){
           )}
 
           {/* Submit button */}
-          <button className="btn btn-primary" disabled={!claimedPhotoInTask||atLimit||!file} onClick={handleSubmit}
+          <button className="btn btn-primary" disabled={!claimedPhotoInTask||atLimit||!file||submitting} onClick={handleSubmit}
             style={{width:"100%",minHeight:50,fontSize:15,fontWeight:700,borderRadius:12}}>
-            {t.btnSubmit}
+            {submitting?"上传中…":t.btnSubmit}
           </button>
         </div>
 
@@ -821,7 +876,7 @@ function Empty({label}){
 }
 
 // ─── AdminView ────────────────────────────────────────────────────────────────
-function AdminView({tasks,setTasks,allClaims,submissions,setSubmissions,t,locale,showToast}){
+function AdminView({tasks,allClaims,submissions,t,locale,showToast}){
   const [tab,setTab]=useState("overview");
   return(
     <div className="admin-page">
@@ -837,9 +892,9 @@ function AdminView({tasks,setTasks,allClaims,submissions,setSubmissions,t,locale
         </div>
         <div className="fade-in" key={tab}>
           {tab==="overview"&&<AdminOverview tasks={tasks} allClaims={allClaims} submissions={submissions} t={t}/>}
-          {tab==="tasks"&&<AdminTasks tasks={tasks} setTasks={setTasks} t={t} locale={locale} showToast={showToast}/>}
-          {tab==="claims"&&<AdminClaims tasks={tasks} setTasks={setTasks} t={t} locale={locale} showToast={showToast}/>}
-          {tab==="submissions"&&<AdminSubmissions submissions={submissions} setSubmissions={setSubmissions} tasks={tasks} t={t} locale={locale} showToast={showToast}/>}
+          {tab==="tasks"&&<AdminTasks tasks={tasks} t={t} locale={locale} showToast={showToast}/>}
+          {tab==="claims"&&<AdminClaims tasks={tasks} t={t} locale={locale} showToast={showToast}/>}
+          {tab==="submissions"&&<AdminSubmissions submissions={submissions} tasks={tasks} t={t} locale={locale} showToast={showToast}/>}
         </div>
       </div>
     </div>
@@ -867,7 +922,7 @@ function AdminOverview({tasks,allClaims,submissions,t}){
 }
 
 // ─── AdminTasks ───────────────────────────────────────────────────────────────
-function AdminTasks({tasks,setTasks,t,locale,showToast}){
+function AdminTasks({tasks,t,locale,showToast}){
   const [form,setForm]=useState(null);
   const [delConfirm,setDelConfirm]=useState(null);
   const [search,setSearch]=useState("");
@@ -875,13 +930,32 @@ function AdminTasks({tasks,setTasks,t,locale,showToast}){
   const openAdd=useCallback(()=>setForm({name:"",nameEn:"",deadline:"",desc:"",photos:[]}),[]);
   const openEdit=useCallback((tk)=>setForm({...tk,photos:tk.photos.map(p=>({...p}))}),[]);
   const updateForm=useCallback((k,v)=>setForm(prev=>({...prev,[k]:v})),[]);
-  const handleSave=useCallback(()=>{
+  const [saving,setSaving]=useState(false);
+  const handleSave=useCallback(async()=>{
     if(!form.name||!form.deadline)return;
-    if(form.id){setTasks(prev=>prev.map(tk=>tk.id===form.id?{...form}:tk));showToast("✓ 已保存");}
-    else{setTasks(prev=>[...prev,{...form,id:uid()}]);showToast("✓ 已创建");}
-    setForm(null);
-  },[form,setTasks,showToast]);
-  const handleDelete=useCallback((id)=>{setTasks(prev=>prev.filter(tk=>tk.id!==id));setDelConfirm(null);showToast("✓ 已删除");},[setTasks,showToast]);
+    setSaving(true);
+    try{
+      const taskId=form.id||newDocId('tasks');
+      showToast("保存中…");
+      const photos=await Promise.all((form.photos||[]).map(async p=>{
+        if(p._file){
+          const url=await uploadFile(p._file);
+          const{_file,_preview,...rest}=p;return{...rest,url};
+        }
+        const{_file,_preview,...rest}=p;return rest;
+      }));
+      await setDoc(doc(db,'tasks',taskId),{
+        name:form.name,nameEn:form.nameEn||'',deadline:form.deadline,
+        desc:form.desc||'',photos,
+      },{merge:true});
+      setForm(null);showToast("✓ 已保存");
+    }catch(err){console.error(err);showToast("保存失败","error");}
+    setSaving(false);
+  },[form,showToast]);
+  const handleDelete=useCallback(async(id)=>{
+    try{await deleteDoc(doc(db,'tasks',id));setDelConfirm(null);showToast("✓ 已删除");}
+    catch(err){console.error(err);showToast("删除失败","error");}
+  },[showToast]);
 
   return(
     <div>
@@ -942,7 +1016,7 @@ function AdminTasks({tasks,setTasks,t,locale,showToast}){
             </div>
             <div style={{display:"flex",gap:10,marginTop:8}}>
               <button className="btn btn-ghost" style={{flex:1}} onClick={()=>setForm(null)}>{t.btnCancel}</button>
-              <button className="btn btn-primary" style={{flex:2,fontWeight:700}} onClick={handleSave}>{t.btnSave}</button>
+              <button className="btn btn-primary" style={{flex:2,fontWeight:700}} onClick={handleSave} disabled={saving}>{saving?"保存中…":t.btnSave}</button>
             </div>
           </div>
         </div>
@@ -962,19 +1036,14 @@ function PhotoUploadZone({photos,onPhotosChange,t}){
   const processFiles=useCallback((files)=>{
     const arr=Array.from(files).filter(f=>f.type.startsWith("image/"));
     if(!arr.length)return;
-    const loaded=new Array(arr.length).fill(null);
-    let done=0;
-    arr.forEach((file,i)=>{
-      const r=new FileReader();
-      r.onload=e=>{
-        loaded[i]={id:uid(),name:file.name,url:e.target.result,gradient:null,claimedBy:null,claimedAt:null};
-        done++;
-        if(done===arr.length){
-          onPhotosChange([...photosRef.current,...loaded]);
-        }
-      };
-      r.readAsDataURL(file);
-    });
+    const newPhotos=arr.map(file=>({
+      id:uid(),name:file.name,url:null,
+      _preview:URL.createObjectURL(file),
+      _file:file,
+      gradient:GRADIENTS[Math.floor(Math.random()*GRADIENTS.length)],
+      claimedBy:null,claimedAt:null,
+    }));
+    onPhotosChange([...photosRef.current,...newPhotos]);
   },[onPhotosChange]);
 
   return(
@@ -992,7 +1061,7 @@ function PhotoUploadZone({photos,onPhotosChange,t}){
         <div className="up-grid">
           {photos.map(p=>(
             <div key={p.id} className="up-item">
-              {p.url?<img src={p.url} alt={p.name} className="up-img"/>:<div className="up-grad" style={{background:p.gradient}}/>}
+              {(p._preview||p.url)?<img src={p._preview||p.url} alt={p.name} className="up-img"/>:<div className="up-grad" style={{background:p.gradient||GRADIENTS[0]}}/>}
               <button className="up-rm" onClick={()=>onPhotosChange(photos.filter(x=>x.id!==p.id))}>✕</button>
               {p.claimedBy&&<div style={{position:"absolute",bottom:0,left:0,right:0,background:"rgba(0,200,83,.85)",color:"#fff",fontSize:9,padding:"2px",textAlign:"center",borderRadius:"0 0 6px 6px"}}>🔒</div>}
             </div>
@@ -1042,16 +1111,22 @@ function WorkUploadButton({file,filePreview,onSelect,disabled,t}){
 }
 
 // ─── AdminClaims ──────────────────────────────────────────────────────────────
-function AdminClaims({tasks,setTasks,t,locale,showToast}){
+function AdminClaims({tasks,t,locale,showToast}){
   const [search,setSearch]=useState("");
   const [expanded,setExpanded]=useState({});
   const [resetConfirm,setResetConfirm]=useState(null);
   const [lightbox,setLightbox]=useState(null);
   const toggleExpand=useCallback((id)=>setExpanded(prev=>({...prev,[id]:!prev[id]})),[]);
-  const handleReset=useCallback(({taskId,photoId})=>{
-    setTasks(prev=>prev.map(tk=>{if(tk.id!==taskId)return tk;return{...tk,photos:tk.photos.map(p=>p.id===photoId?{...p,claimedBy:null,claimedAt:null}:p)};}));
-    setResetConfirm(null);showToast(t.resetSuccess);
-  },[setTasks,showToast,t]);
+  const handleReset=useCallback(async({taskId,photoId})=>{
+    try{
+      const task=tasks.find(tk=>tk.id===taskId);
+      const updatedPhotos=(task?.photos||[]).map(p=>
+        p.id===photoId?{...p,claimedBy:null,claimedAt:null}:p
+      );
+      await updateDoc(doc(db,'tasks',taskId),{photos:updatedPhotos});
+      setResetConfirm(null);showToast(t.resetSuccess);
+    }catch(err){console.error(err);showToast("重置失败","error");}
+  },[tasks,t,showToast]);
   const visibleTasks=tasks.filter(tk=>fuzzyMatch(tk.name+" "+tk.nameEn+" "+tk.desc,search)).filter(tk=>tk.photos.some(p=>p.claimedBy));
   const totalClaimed=tasks.reduce((s,tk)=>s+tk.photos.filter(p=>p.claimedBy).length,0);
 
@@ -1140,7 +1215,7 @@ function AdminClaims({tasks,setTasks,t,locale,showToast}){
 }
 
 // ─── AdminSubmissions ─────────────────────────────────────────────────────────
-function AdminSubmissions({submissions,setSubmissions,tasks,t,locale,showToast}){
+function AdminSubmissions({submissions,tasks,t,locale,showToast}){
   const [delConfirm,setDelConfirm]=useState(null);
   // workLightbox: { taskId, idx }  — idx is index within that task's image-having subs
   const [workLightbox,setWorkLightbox]=useState(null);
@@ -1175,9 +1250,10 @@ function AdminSubmissions({submissions,setSubmissions,tasks,t,locale,showToast})
   const [selCols,setSelCols]=useState(["email","phone","orderNo","imageCount","note","time"]);
   const [expandedTasks,setExpandedTasks]=useState({});
 
-  const handleDelete=useCallback((id)=>{
-    setSubmissions(prev=>prev.filter(s=>s.id!==id));setDelConfirm(null);showToast("✓ 已删除");
-  },[setSubmissions,showToast]);
+  const handleDelete=useCallback(async(id)=>{
+    try{await deleteDoc(doc(db,'submissions',id));setDelConfirm(null);showToast("✓ 已删除");}
+    catch(err){console.error(err);showToast("删除失败","error");}
+  },[showToast]);
 
   const toggleTaskExpand=useCallback((id)=>setExpandedTasks(prev=>({...prev,[id]:prev[id]===false?true:false})),[]);
 
