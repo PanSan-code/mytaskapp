@@ -1,12 +1,14 @@
 import { useState, useCallback, useRef, useEffect } from "react";
 import * as XLSX from "xlsx";
-import { db } from './firebase.js';
+import { db, auth } from './firebase.js';
 import { collection, doc, setDoc, updateDoc, deleteDoc, onSnapshot } from 'firebase/firestore';
+import { signInWithEmailAndPassword, signOut, onAuthStateChanged } from 'firebase/auth';
 // Cloudinary upload
 
 // ─── Cloudinary upload helper ─────────────────────────────────────────────────
 const CLOUDINARY_CLOUD = "dudnepxz5";
 const CLOUDINARY_PRESET = "ml_default";
+async function uploadFile(file) {
 async function uploadFile(file) {
   const fd = new FormData();
   fd.append("file", file);
@@ -362,7 +364,15 @@ export default function App() {
   const [submissions,setSubmissions]=useState([]);
   const [appLoading,setAppLoading]=useState(true);
   const [toast,setToast]=useState(null);
+  const [adminUser,setAdminUser]=useState(null); // Firebase auth user
+  const [userEmail,setUserEmail]=useState(""); // logged-in user email
   const showToast=useCallback((msg,type="success")=>{setToast({msg,type});setTimeout(()=>setToast(null),2800);},[]);
+
+  useEffect(()=>{
+    // Listen to Firebase auth state
+    const unsub=onAuthStateChanged(auth,u=>setAdminUser(u));
+    return unsub;
+  },[]);
 
   useEffect(()=>{
     let first=true;
@@ -378,6 +388,9 @@ export default function App() {
 
   const t=T[locale];
   const allClaims=tasks.flatMap(tk=>(tk.photos||[]).filter(p=>p.claimedBy).map(p=>({...p,taskId:tk.id,taskName:tk.name,taskNameEn:tk.nameEn})));
+  // Filter claims/submissions for current user
+  const userClaims=userEmail?allClaims.filter(p=>p.claimedBy===userEmail):[];
+  const userSubmissions=userEmail?submissions.filter(s=>s.email===userEmail):[];
 
   if(appLoading) return(
     <div style={{minHeight:"100vh",background:"var(--bg)",display:"flex",alignItems:"center",justifyContent:"center"}}>
@@ -386,6 +399,14 @@ export default function App() {
         <div style={{fontSize:48,marginBottom:16}}>⏳</div>
         <div style={{fontSize:14,color:"var(--text3)"}}>加载中…</div>
       </div>
+    </div>
+  );
+
+  // If admin view and not logged in, show admin login
+  if(view==="admin"&&!adminUser) return(
+    <div style={{minHeight:"100vh",background:"var(--bg)"}}>
+      <style>{CSS}</style>
+      <AdminLogin t={t} locale={locale} setLocale={setLocale} onBack={()=>setView("user")}/>
     </div>
   );
 
@@ -409,14 +430,20 @@ export default function App() {
             </button>
           ))}
         </div>
-        <button onClick={()=>setLocale(l=>l==="zh"?"en":"zh")}
-          style={{background:"var(--bg)",border:"1px solid var(--border)",color:"var(--text2)",padding:"5px 10px",borderRadius:6,fontSize:11,cursor:"pointer",fontWeight:600,whiteSpace:"nowrap"}}>
-          {t.lang}
-        </button>
+        {view==="admin"&&adminUser
+          ?<button onClick={()=>signOut(auth).then(()=>setView("user"))}
+            style={{background:"#FFEBEE",border:"1px solid #FFCDD2",color:"var(--danger)",padding:"5px 10px",borderRadius:6,fontSize:11,cursor:"pointer",fontWeight:600,whiteSpace:"nowrap"}}>
+            退出
+          </button>
+          :<button onClick={()=>setLocale(l=>l==="zh"?"en":"zh")}
+            style={{background:"var(--bg)",border:"1px solid var(--border)",color:"var(--text2)",padding:"5px 10px",borderRadius:6,fontSize:11,cursor:"pointer",fontWeight:600,whiteSpace:"nowrap"}}>
+            {t.lang}
+          </button>
+        }
       </header>
 
       {view==="user"
-        ?<UserView tasks={tasks} allClaims={allClaims} submissions={submissions} t={t} locale={locale} showToast={showToast}/>
+        ?<UserView tasks={tasks} allClaims={allClaims} userClaims={userClaims} submissions={submissions} userSubmissions={userSubmissions} userEmail={userEmail} setUserEmail={setUserEmail} t={t} locale={locale} showToast={showToast}/>
         :<AdminView tasks={tasks} allClaims={allClaims} submissions={submissions} t={t} locale={locale} showToast={showToast}/>}
 
       {toast&&<div className={`toast toast-${toast.type}`}>{toast.msg}</div>}
@@ -424,8 +451,58 @@ export default function App() {
   );
 }
 
+// ─── AdminLogin ───────────────────────────────────────────────────────────────
+function AdminLogin({t,locale,setLocale,onBack}){
+  const [email,setEmail]=useState("");
+  const [password,setPassword]=useState("");
+  const [error,setError]=useState("");
+  const [loading,setLoading]=useState(false);
+  const handleLogin=async()=>{
+    if(!email||!password){setError("请填写邮箱和密码");return;}
+    setLoading(true);setError("");
+    try{
+      await signInWithEmailAndPassword(auth,email,password);
+    }catch(err){
+      setError("邮箱或密码错误");
+      setLoading(false);
+    }
+  };
+  return(
+    <div style={{minHeight:"100vh",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:20}}>
+      <div style={{width:"100%",maxWidth:360}}>
+        <div style={{textAlign:"center",marginBottom:32}}>
+          <div style={{width:56,height:56,background:"var(--mi-orange)",borderRadius:14,display:"flex",alignItems:"center",justifyContent:"center",margin:"0 auto 12px",fontSize:26}}>🔑</div>
+          <div style={{fontSize:20,fontWeight:800}}>管理员登录</div>
+          <div style={{fontSize:12,color:"var(--text3)",marginTop:4}}>Admin Login</div>
+        </div>
+        <div className="surface" style={{padding:24}}>
+          <div className="form-group">
+            <label className="form-label">邮箱</label>
+            <input className="inp" type="email" placeholder="admin@example.com" value={email}
+              onChange={e=>{setEmail(e.target.value);setError("");}}
+              onKeyDown={e=>e.key==="Enter"&&handleLogin()}/>
+          </div>
+          <div className="form-group">
+            <label className="form-label">密码</label>
+            <input className="inp" type="password" placeholder="••••••••" value={password}
+              onChange={e=>{setPassword(e.target.value);setError("");}}
+              onKeyDown={e=>e.key==="Enter"&&handleLogin()}/>
+          </div>
+          {error&&<div style={{background:"#FFEBEE",color:"var(--danger)",padding:"10px 14px",borderRadius:8,fontSize:13,marginBottom:14}}>⚠️ {error}</div>}
+          <button className="btn btn-primary" style={{width:"100%",fontWeight:700,fontSize:15}} onClick={handleLogin} disabled={loading}>
+            {loading?"登录中…":"登录"}
+          </button>
+        </div>
+        <button onClick={onBack} style={{display:"block",margin:"16px auto 0",background:"none",border:"none",color:"var(--text3)",fontSize:13,cursor:"pointer"}}>
+          ← 返回用户端
+        </button>
+      </div>
+    </div>
+  );
+}
+
 // ─── UserView ─────────────────────────────────────────────────────────────────
-function UserView({tasks,allClaims,submissions,t,locale,showToast}){
+function UserView({tasks,allClaims,userClaims,submissions,userSubmissions,userEmail,setUserEmail,t,locale,showToast}){
   const [tab,setTab]=useState("tasks");
   const [detailId,setDetailId]=useState(null);
   const switchTab=useCallback((k)=>{setTab(k);setDetailId(null);},[]);
@@ -435,6 +512,15 @@ function UserView({tasks,allClaims,submissions,t,locale,showToast}){
     <>
       <div className="page">
         <div className="page-inner">
+          {/* User email banner */}
+          {!userEmail?(
+            <UserEmailBanner setUserEmail={setUserEmail} t={t}/>
+          ):(
+            <div style={{background:"var(--mi-orange-light)",border:"1px solid #FFB380",borderRadius:10,padding:"8px 14px",marginBottom:12,display:"flex",alignItems:"center",justifyContent:"space-between",gap:8}}>
+              <span style={{fontSize:12,color:"var(--mi-orange)",fontWeight:600}}>✉️ {userEmail}</span>
+              <button onClick={()=>setUserEmail("")} style={{background:"none",border:"none",color:"var(--text3)",fontSize:11,cursor:"pointer",padding:"2px 6px"}}>切换</button>
+            </div>
+          )}
           {tab==="tasks"&&detailId&&detailTask?(
             <div className="fade-in">
               <TaskDetailTab task={detailTask} tasks={tasks} t={t} locale={locale} showToast={showToast} onBack={()=>setDetailId(null)}/>
@@ -442,8 +528,8 @@ function UserView({tasks,allClaims,submissions,t,locale,showToast}){
           ):(
             <div className="fade-in" key={tab}>
               {tab==="tasks"&&<TaskListTab tasks={tasks} locale={locale} t={t} onView={setDetailId}/>}
-              {tab==="my"&&<MyPhotosTab allClaims={allClaims} t={t} locale={locale}/>}
-              {tab==="submit"&&<SubmitTab tasks={tasks} submissions={submissions} t={t} locale={locale} showToast={showToast}/>}
+              {tab==="my"&&<MyPhotosTab allClaims={userEmail?userClaims:allClaims} t={t} locale={locale} userEmail={userEmail}/>}
+              {tab==="submit"&&<SubmitTab tasks={tasks} submissions={userEmail?userSubmissions:submissions} userEmail={userEmail} t={t} locale={locale} showToast={showToast}/>}
             </div>
           )}
         </div>
@@ -456,6 +542,30 @@ function UserView({tasks,allClaims,submissions,t,locale,showToast}){
         ))}
       </nav>
     </>
+  );
+}
+
+// ─── UserEmailBanner ──────────────────────────────────────────────────────────
+function UserEmailBanner({setUserEmail,t}){
+  const [email,setEmail]=useState("");
+  const [error,setError]=useState("");
+  const handleConfirm=()=>{
+    if(!validateEmail(email)){setError(t.emailInvalid);return;}
+    setUserEmail(email.trim().toLowerCase());
+  };
+  return(
+    <div style={{background:"var(--surface)",borderRadius:12,padding:16,marginBottom:16,boxShadow:"var(--shadow-sm)"}}>
+      <div style={{fontSize:14,fontWeight:700,marginBottom:4}}>👋 欢迎使用任务平台</div>
+      <div style={{fontSize:12,color:"var(--text3)",marginBottom:12}}>请输入您的邮箱以查看个人数据</div>
+      <div style={{display:"flex",gap:8}}>
+        <input className="inp" style={{flex:1}} type="email" placeholder={t.emailPlaceholder}
+          value={email} onChange={e=>{setEmail(e.target.value);setError("");}}
+          onKeyDown={e=>e.key==="Enter"&&handleConfirm()}/>
+        <button className="btn btn-primary btn-sm" style={{flexShrink:0}} onClick={handleConfirm}>确认</button>
+      </div>
+      {error&&<p className="form-error" style={{marginTop:6}}>⚠️ {error}</p>}
+      <p className="form-hint" style={{marginTop:6}}>{t.emailHint}</p>
+    </div>
   );
 }
 
@@ -530,11 +640,14 @@ function TaskDetailTab({task,tasks,t,locale,showToast,onBack}){
   const [claiming,setClaiming]=useState(false);
   const handleClaim=useCallback(async()=>{
     if(!validateEmail(email)){setEmailError(t.emailInvalid);return;}
+    const emailNorm=email.trim().toLowerCase();
+    const latestTask=tasks.find(tk=>tk.id===task.id)||task;
+    const alreadyClaimed=(latestTask.photos||[]).filter(p=>p.claimedBy===emailNorm).length;
+    if(alreadyClaimed>=3){setEmailError("每个任务最多领取3张照片");return;}
     setClaiming(true);
     try{
-      const latestTask=tasks.find(tk=>tk.id===task.id)||task;
       const updatedPhotos=(latestTask.photos||[]).map(p=>
-        p.id===claimTarget?{...p,claimedBy:email.trim().toLowerCase(),claimedAt:Date.now()}:p
+        p.id===claimTarget?{...p,claimedBy:emailNorm,claimedAt:Date.now()}:p
       );
       await updateDoc(doc(db,'tasks',task.id),{photos:updatedPhotos});
       setClaimTarget(null);setEmail("");setEmailError("");
@@ -600,6 +713,11 @@ function TaskDetailTab({task,tasks,t,locale,showToast,onBack}){
                 onChange={e=>{setEmail(e.target.value);setEmailError("");}}
                 onKeyDown={e=>e.key==="Enter"&&handleClaim()}/>
               <p className="form-hint">{t.emailHint}</p>
+              {validateEmail(email)&&(()=>{
+                const latestTask=tasks.find(tk=>tk.id===task.id)||task;
+                const cnt=(latestTask.photos||[]).filter(p=>p.claimedBy===email.trim().toLowerCase()).length;
+                return cnt>0?<p style={{fontSize:11,color:cnt>=3?"var(--danger)":"var(--mi-orange)",marginTop:4,fontWeight:600}}>{cnt>=3?"⛔ 已达上限（3/3）":`已领取 ${cnt}/3 张`}</p>:null;
+              })()}
               {emailError&&<p className="form-error">⚠️ {emailError}</p>}
             </div>
             <div style={{display:"flex",gap:10,marginTop:4}}>
@@ -614,7 +732,7 @@ function TaskDetailTab({task,tasks,t,locale,showToast,onBack}){
 }
 
 // ─── MyPhotosTab ──────────────────────────────────────────────────────────────
-function MyPhotosTab({allClaims,t,locale}){
+function MyPhotosTab({allClaims,t,locale,userEmail}){
   return(
     <div>
       <div className="section-title">{t.myTitle}</div>
@@ -637,8 +755,8 @@ function MyPhotosTab({allClaims,t,locale}){
 }
 
 // ─── SubmitTab ────────────────────────────────────────────────────────────────
-function SubmitTab({tasks,submissions,t,locale,showToast}){
-  const [email,setEmail]=useState("");
+function SubmitTab({tasks,submissions,userEmail,t,locale,showToast}){
+  const [email,setEmail]=useState(userEmail||"");
   const [taskId,setTaskId]=useState("");
   const [phone,setPhone]=useState("");
   const [phoneConfirm,setPhoneConfirm]=useState("");
@@ -936,14 +1054,23 @@ function AdminTasks({tasks,t,locale,showToast}){
     setSaving(true);
     try{
       const taskId=form.id||newDocId('tasks');
-      showToast("保存中…");
-      const photos=await Promise.all((form.photos||[]).map(async p=>{
+      const allPhotos=form.photos||[];
+      const needUpload=allPhotos.filter(p=>p._file).length;
+      const photos=[];
+      let uploaded=0;
+      for(const p of allPhotos){
         if(p._file){
+          uploaded++;
+          showToast(`上传中 ${uploaded}/${needUpload}`);
           const url=await uploadFile(p._file);
-          const{_file,_preview,...rest}=p;return{...rest,url};
+          const{_file,_preview,...rest}=p;
+          photos.push({...rest,url});
+        }else{
+          const{_file,_preview,...rest}=p;
+          photos.push(rest);
         }
-        const{_file,_preview,...rest}=p;return rest;
-      }));
+      }
+      showToast("保存中…");
       await setDoc(doc(db,'tasks',taskId),{
         name:form.name,nameEn:form.nameEn||'',deadline:form.deadline,
         desc:form.desc||'',photos,
@@ -1115,8 +1242,13 @@ function AdminClaims({tasks,t,locale,showToast}){
   const [search,setSearch]=useState("");
   const [expanded,setExpanded]=useState({});
   const [resetConfirm,setResetConfirm]=useState(null);
+  const [bulkConfirm,setBulkConfirm]=useState(null); // {taskId,scope:'task'|'all'}
+  const [selected,setSelected]=useState({}); // {photoKey: {taskId,photoId}} where photoKey=taskId+photoId
+  const [selectMode,setSelectMode]=useState(false);
   const [lightbox,setLightbox]=useState(null);
+  const [resetting,setResetting]=useState(false);
   const toggleExpand=useCallback((id)=>setExpanded(prev=>({...prev,[id]:!prev[id]})),[]);
+
   const handleReset=useCallback(async({taskId,photoId})=>{
     try{
       const task=tasks.find(tk=>tk.id===taskId);
@@ -1127,6 +1259,61 @@ function AdminClaims({tasks,t,locale,showToast}){
       setResetConfirm(null);showToast(t.resetSuccess);
     }catch(err){console.error(err);showToast("重置失败","error");}
   },[tasks,t,showToast]);
+
+  // Bulk reset selected photos
+  const handleBulkReset=useCallback(async()=>{
+    setResetting(true);
+    try{
+      // Group selected by taskId
+      const byTask={};
+      Object.values(selected).forEach(({taskId,photoId})=>{
+        if(!byTask[taskId])byTask[taskId]=[];
+        byTask[taskId].push(photoId);
+      });
+      for(const [taskId,photoIds] of Object.entries(byTask)){
+        const task=tasks.find(tk=>tk.id===taskId);
+        const updatedPhotos=(task?.photos||[]).map(p=>
+          photoIds.includes(p.id)?{...p,claimedBy:null,claimedAt:null}:p
+        );
+        await updateDoc(doc(db,'tasks',taskId),{photos:updatedPhotos});
+      }
+      showToast(`✓ 已重置 ${Object.keys(selected).length} 张`);
+      setSelected({});setSelectMode(false);setBulkConfirm(null);
+    }catch(err){console.error(err);showToast("批量重置失败","error");}
+    setResetting(false);
+  },[selected,tasks,showToast]);
+
+  // Reset all claimed in a task
+  const handleResetTask=useCallback(async(taskId)=>{
+    setResetting(true);
+    try{
+      const task=tasks.find(tk=>tk.id===taskId);
+      const updatedPhotos=(task?.photos||[]).map(p=>({...p,claimedBy:null,claimedAt:null}));
+      await updateDoc(doc(db,'tasks',taskId),{photos:updatedPhotos});
+      showToast("✓ 已重置该任务所有领取");setBulkConfirm(null);
+    }catch(err){console.error(err);showToast("重置失败","error");}
+    setResetting(false);
+  },[tasks,showToast]);
+
+  const toggleSelect=(taskId,photoId)=>{
+    const key=taskId+photoId;
+    setSelected(prev=>{
+      const n={...prev};
+      if(n[key])delete n[key]; else n[key]={taskId,photoId};
+      return n;
+    });
+  };
+  const selectAllInTask=(task)=>{
+    const claimed=task.photos.filter(p=>p.claimedBy);
+    const allSelected=claimed.every(p=>selected[task.id+p.id]);
+    if(allSelected){
+      setSelected(prev=>{const n={...prev};claimed.forEach(p=>delete n[task.id+p.id]);return n;});
+    } else {
+      setSelected(prev=>{const n={...prev};claimed.forEach(p=>{n[task.id+p.id]={taskId:task.id,photoId:p.id};});return n;});
+    }
+  };
+
+  const selectedCount=Object.keys(selected).length;
   const visibleTasks=tasks.filter(tk=>fuzzyMatch(tk.name+" "+tk.nameEn+" "+tk.desc,search)).filter(tk=>tk.photos.some(p=>p.claimedBy));
   const totalClaimed=tasks.reduce((s,tk)=>s+tk.photos.filter(p=>p.claimedBy).length,0);
 
@@ -1135,11 +1322,25 @@ function AdminClaims({tasks,t,locale,showToast}){
       <div style={{display:"flex",gap:10,alignItems:"center",marginBottom:14,flexWrap:"wrap"}}>
         <div style={{flex:1,minWidth:180}}><SearchBar value={search} onChange={setSearch} placeholder={t.searchPlaceholder}/></div>
         <span className="tag tag-orange">{totalClaimed} {locale==="zh"?"已领取":"claimed"}</span>
+        <button className={`btn btn-sm ${selectMode?"btn-primary":""}`} style={{fontSize:12,padding:"5px 12px"}}
+          onClick={()=>{setSelectMode(v=>!v);setSelected({});}}>
+          {selectMode?"退出选择":"批量选择"}
+        </button>
       </div>
+      {selectMode&&selectedCount>0&&(
+        <div style={{background:"#FFF3E0",border:"1px solid #FFB74D",borderRadius:10,padding:"10px 14px",marginBottom:12,display:"flex",alignItems:"center",justifyContent:"space-between",gap:8,flexWrap:"wrap"}}>
+          <span style={{fontSize:13,fontWeight:600,color:"var(--mi-orange)"}}>已选 {selectedCount} 张</span>
+          <button className="btn btn-sm" style={{background:"#E65100",color:"#fff",fontSize:12,fontWeight:700}}
+            onClick={()=>setBulkConfirm({scope:"selected"})}>
+            ↺ 批量重置所选
+          </button>
+        </div>
+      )}
       {visibleTasks.length===0?<Empty label={search?t.searchNoResult:t.noClaimedPhotos}/>:(
         visibleTasks.map(task=>{
           const claimed=task.photos.filter(p=>p.claimedBy);
           const isExp=expanded[task.id]!==false;
+          const allTaskSelected=claimed.length>0&&claimed.every(p=>selected[task.id+p.id]);
           return(
             <div key={task.id} className="claim-group">
               <div className="claim-group-hdr" onClick={()=>toggleExpand(task.id)}>
@@ -1157,10 +1358,26 @@ function AdminClaims({tasks,t,locale,showToast}){
                   <div style={{fontSize:11,color:"var(--text3)",marginTop:1}}>{fmtDate(task.deadline)}</div>
                 </div>
                 <span className="tag tag-orange" style={{flexShrink:0}}>🔒 {claimed.length}/{task.photos.length}</span>
+                {selectMode&&(
+                  <button className="btn btn-xs" style={{fontSize:10,background:allTaskSelected?"var(--mi-orange)":"var(--bg)",color:allTaskSelected?"#fff":"var(--text3)",border:"1px solid var(--border)",marginLeft:4}}
+                    onClick={e=>{e.stopPropagation();selectAllInTask(task);}}>
+                    {allTaskSelected?"取消全选":"全选"}
+                  </button>
+                )}
+                {!selectMode&&(
+                  <button className="btn btn-xs" style={{fontSize:10,color:"#E65100",borderColor:"#FFCCBC",marginLeft:4}}
+                    onClick={e=>{e.stopPropagation();setBulkConfirm({scope:"task",taskId:task.id,taskName:task.name,count:claimed.length});}}>
+                    ↺ 重置全部
+                  </button>
+                )}
                 <span style={{color:"var(--text3)",fontSize:16,transform:isExp?"rotate(90deg)":"none",transition:"transform .2s",display:"inline-block",marginLeft:4}}>›</span>
               </div>
               {isExp&&claimed.map(p=>(
-                <div key={p.id} className="claim-row" style={{flexWrap:"wrap",gap:8}}>
+                <div key={p.id} className="claim-row" style={{flexWrap:"wrap",gap:8,background:selected[task.id+p.id]?"#FFF8E1":""}}>
+                  {selectMode&&(
+                    <input type="checkbox" checked={!!selected[task.id+p.id]} onChange={()=>toggleSelect(task.id,p.id)}
+                      style={{width:16,height:16,accentColor:"var(--mi-orange)",flexShrink:0,alignSelf:"center"}}/>
+                  )}
                   <div onClick={()=>setLightbox(p)} style={{width:42,height:42,borderRadius:6,overflow:"hidden",flexShrink:0,cursor:"zoom-in"}}>
                     {p.url?<img src={p.url} alt="" style={{width:"100%",height:"100%",objectFit:"cover"}}/>:<div style={{width:"100%",height:"100%",background:p.gradient}}/>}
                   </div>
@@ -1169,10 +1386,12 @@ function AdminClaims({tasks,t,locale,showToast}){
                     <div style={{fontSize:11,color:"var(--success)",marginTop:2,fontWeight:500,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>● {p.claimedBy}</div>
                     <div style={{fontSize:10,color:"var(--text3)",marginTop:1}}>{fmtTime(p.claimedAt)}</div>
                   </div>
-                  <button className="btn btn-ghost btn-xs" style={{flexShrink:0,color:"var(--mi-orange)",borderColor:"#FFB380"}}
-                    onClick={()=>setResetConfirm({taskId:task.id,photoId:p.id,photoName:p.name,email:p.claimedBy})}>
-                    ↺ {t.btnReset}
-                  </button>
+                  {!selectMode&&(
+                    <button className="btn btn-ghost btn-xs" style={{flexShrink:0,color:"var(--mi-orange)",borderColor:"#FFB380"}}
+                      onClick={()=>setResetConfirm({taskId:task.id,photoId:p.id,photoName:p.name,email:p.claimedBy})}>
+                      ↺ {t.btnReset}
+                    </button>
+                  )}
                 </div>
               ))}
             </div>
@@ -1191,6 +1410,24 @@ function AdminClaims({tasks,t,locale,showToast}){
             <div style={{display:"flex",gap:10}}>
               <button className="btn btn-ghost" style={{flex:1}} onClick={()=>setResetConfirm(null)}>{t.btnCancel}</button>
               <button className="btn btn-primary" style={{flex:2,background:"#E65100"}} onClick={()=>handleReset(resetConfirm)}>↺ {t.btnReset}</button>
+            </div>
+          </div>
+        </div>
+      )}
+      {bulkConfirm&&(
+        <div className="overlay overlay-center" onClick={()=>setBulkConfirm(null)}>
+          <div className="dialog scale-in" onClick={e=>e.stopPropagation()}>
+            <div style={{fontSize:32,textAlign:"center",marginBottom:12}}>↺</div>
+            <p style={{fontSize:14,textAlign:"center",fontWeight:600,marginBottom:8}}>
+              {bulkConfirm.scope==="task"?`重置「${bulkConfirm.taskName}」全部 ${bulkConfirm.count} 张领取？`:`重置已选 ${selectedCount} 张领取？`}
+            </p>
+            <p style={{fontSize:12,color:"var(--text3)",textAlign:"center",marginBottom:20}}>此操作不可恢复</p>
+            <div style={{display:"flex",gap:10}}>
+              <button className="btn btn-ghost" style={{flex:1}} onClick={()=>setBulkConfirm(null)} disabled={resetting}>{t.btnCancel}</button>
+              <button className="btn btn-primary" style={{flex:2,background:"#E65100"}} disabled={resetting}
+                onClick={()=>bulkConfirm.scope==="task"?handleResetTask(bulkConfirm.taskId):handleBulkReset()}>
+                {resetting?"重置中…":"↺ 确认重置"}
+              </button>
             </div>
           </div>
         </div>
