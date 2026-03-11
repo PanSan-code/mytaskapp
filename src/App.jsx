@@ -1,7 +1,7 @@
 import { useState, useCallback, useRef, useEffect } from "react";
 import * as XLSX from "xlsx";
 import { db, auth } from './firebase.js';
-import { collection, doc, setDoc, updateDoc, deleteDoc, onSnapshot } from 'firebase/firestore';
+import { collection, doc, setDoc, updateDoc, deleteDoc, onSnapshot, runTransaction } from 'firebase/firestore';
 import { signInWithEmailAndPassword, signOut, onAuthStateChanged } from 'firebase/auth';
 // Cloudinary upload
 
@@ -640,20 +640,33 @@ function TaskDetailTab({task,tasks,t,locale,showToast,onBack}){
   const handleClaim=useCallback(async()=>{
     if(!validateEmail(email)){setEmailError(t.emailInvalid);return;}
     const emailNorm=email.trim().toLowerCase();
-    const latestTask=tasks.find(tk=>tk.id===task.id)||task;
-    const alreadyClaimed=(latestTask.photos||[]).filter(p=>p.claimedBy===emailNorm).length;
-    if(alreadyClaimed>=3){setEmailError("每个任务最多领取3张照片");return;}
     setClaiming(true);
     try{
-      const updatedPhotos=(latestTask.photos||[]).map(p=>
-        p.id===claimTarget?{...p,claimedBy:emailNorm,claimedAt:Date.now()}:p
-      );
-      await updateDoc(doc(db,'tasks',task.id),{photos:updatedPhotos});
+      const taskRef=doc(db,'tasks',task.id);
+      await runTransaction(db,async(transaction)=>{
+        const taskSnap=await transaction.get(taskRef);
+        if(!taskSnap.exists())throw new Error("任务不存在");
+        const photos=taskSnap.data().photos||[];
+        const target=photos.find(p=>p.id===claimTarget);
+        if(!target)throw new Error("照片不存在");
+        if(target.claimedBy)throw new Error("ALREADY_CLAIMED");
+        const userCount=photos.filter(p=>p.claimedBy===emailNorm).length;
+        if(userCount>=3)throw new Error("LIMIT_EXCEEDED");
+        const updatedPhotos=photos.map(p=>
+          p.id===claimTarget?{...p,claimedBy:emailNorm,claimedAt:Date.now()}:p
+        );
+        transaction.update(taskRef,{photos:updatedPhotos});
+      });
       setClaimTarget(null);setEmail("");setEmailError("");
       showToast(t.claimSuccess);
-    }catch(err){console.error(err);showToast("领取失败，请重试","error");}
+    }catch(err){
+      console.error(err);
+      if(err.message==="ALREADY_CLAIMED")setEmailError("该照片刚刚已被他人领取，请选择其他照片");
+      else if(err.message==="LIMIT_EXCEEDED")setEmailError("每个任务最多领取3张照片");
+      else showToast("领取失败，请重试","error");
+    }
     setClaiming(false);
-  },[email,claimTarget,task,tasks,t,showToast]);
+  },[email,claimTarget,task,t,showToast]);
   const handleDownload=useCallback((p)=>{
     if(p.url){const a=document.createElement("a");a.href=p.url;a.download=p.name;a.click();}
     else showToast(`↓ ${p.name}`);
