@@ -1043,6 +1043,10 @@ function AdminTasks({tasks,t,locale,showToast}){
   const [form,setForm]=useState(null);
   const [delConfirm,setDelConfirm]=useState(null);
   const [search,setSearch]=useState("");
+  const [selectMode,setSelectMode]=useState(false);
+  const [selected,setSelected]=useState({});
+  const [bulkDelConfirm,setBulkDelConfirm]=useState(false);
+  const [bulkDeleting,setBulkDeleting]=useState(false);
   const filtered=tasks.filter(tk=>fuzzyMatch(tk.name+" "+tk.nameEn+" "+tk.desc,search));
   const openAdd=useCallback(()=>setForm({name:"",nameEn:"",deadline:"",desc:"",photos:[]}),[]);
   const openEdit=useCallback((tk)=>setForm({...tk,photos:tk.photos.map(p=>({...p}))}),[]);
@@ -1083,17 +1087,65 @@ function AdminTasks({tasks,t,locale,showToast}){
     catch(err){console.error(err);showToast("删除失败","error");}
   },[showToast]);
 
+  const toggleSelect=(id)=>setSelected(prev=>{const n={...prev};if(n[id])delete n[id];else n[id]=true;return n;});
+  const selectedIds=Object.keys(selected);
+  const selectedCount=selectedIds.length;
+  const allFilteredSelected=filtered.length>0&&filtered.every(tk=>selected[tk.id]);
+
+  const handleBulkDelete=useCallback(async()=>{
+    setBulkDeleting(true);
+    try{
+      for(const id of selectedIds){
+        await deleteDoc(doc(db,'tasks',id));
+      }
+      showToast(`✓ 已删除 ${selectedIds.length} 个任务`);
+      setSelected({});setSelectMode(false);setBulkDelConfirm(false);
+    }catch(err){console.error(err);showToast("批量删除失败","error");}
+    setBulkDeleting(false);
+  },[selectedIds,showToast]);
+
   return(
     <div>
       <div style={{display:"flex",gap:10,alignItems:"center",marginBottom:14,flexWrap:"wrap"}}>
         <div style={{flex:1,minWidth:180}}><SearchBar value={search} onChange={setSearch} placeholder={t.searchPlaceholder}/></div>
-        <button className="btn btn-primary btn-sm" onClick={openAdd} style={{flexShrink:0}}>+ {t.btnAddTask}</button>
+        <button className={`btn btn-sm ${selectMode?"btn-primary":""}`} style={{fontSize:12,padding:"5px 12px"}}
+          onClick={()=>{setSelectMode(v=>!v);setSelected({})}}>
+          {selectMode?"退出选择":"批量选择"}
+        </button>
+        {!selectMode&&<button className="btn btn-primary btn-sm" onClick={openAdd} style={{flexShrink:0}}>+ {t.btnAddTask}</button>}
       </div>
+
+      {selectMode&&(
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:10,gap:8,flexWrap:"wrap"}}>
+          <label style={{display:"flex",alignItems:"center",gap:6,fontSize:12,color:"var(--text2)",cursor:"pointer",userSelect:"none"}}
+            onClick={()=>{if(allFilteredSelected)setSelected({});else{const n={};filtered.forEach(tk=>{n[tk.id]=true;});setSelected(n);}}}>
+            <div style={{width:16,height:16,borderRadius:4,border:`2px solid ${allFilteredSelected?"var(--mi-orange)":"var(--border)"}`,background:allFilteredSelected?"var(--mi-orange)":"transparent",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>
+              {allFilteredSelected&&<span style={{color:"#fff",fontSize:10,fontWeight:800,lineHeight:1}}>✓</span>}
+            </div>
+            全选
+          </label>
+          {selectedCount>0&&(
+            <div style={{display:"flex",alignItems:"center",gap:8}}>
+              <span style={{fontSize:12,fontWeight:600,color:"var(--mi-orange)"}}>已选 {selectedCount} 个任务</span>
+              <button className="btn btn-sm" style={{background:"var(--danger)",color:"#fff",fontSize:12,fontWeight:700}}
+                onClick={()=>setBulkDelConfirm(true)}>
+                🗑 批量删除
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
       {filtered.length===0?<Empty label={search?t.searchNoResult:t.noData}/>:(
         filtered.map(tk=>{
           const avail=tk.photos.filter(p=>!p.claimedBy).length;
+          const isSel=!!selected[tk.id];
           return(
-            <div key={tk.id} style={{background:"var(--surface)",borderRadius:12,padding:"12px 14px",marginBottom:10,boxShadow:"var(--shadow-sm)",display:"flex",gap:12,alignItems:"center"}}>
+            <div key={tk.id} style={{background:isSel?"#FFF3E0":"var(--surface)",borderRadius:12,padding:"12px 14px",marginBottom:10,boxShadow:"var(--shadow-sm)",display:"flex",gap:12,alignItems:"center",border:isSel?"1.5px solid #FFB74D":"1.5px solid transparent",transition:"all .15s"}}>
+              {selectMode&&(
+                <input type="checkbox" checked={isSel} onChange={()=>toggleSelect(tk.id)}
+                  style={{width:17,height:17,accentColor:"var(--mi-orange)",flexShrink:0}}/>
+              )}
               <div style={{display:"flex",gap:3,flexShrink:0}}>
                 {tk.photos.slice(0,2).map(p=>(
                   <div key={p.id} style={{width:36,height:36,borderRadius:6,overflow:"hidden"}}>
@@ -1107,10 +1159,12 @@ function AdminTasks({tasks,t,locale,showToast}){
                   {fmtDate(tk.deadline)} · <span className="tag tag-orange" style={{fontSize:10}}>{avail}/{tk.photos.length}</span>
                 </div>
               </div>
-              <div style={{display:"flex",gap:6,flexShrink:0}}>
-                <button className="btn btn-ghost btn-sm" onClick={()=>openEdit(tk)}>{t.btnEdit}</button>
-                <button className="btn btn-danger" style={{minHeight:36}} onClick={()=>setDelConfirm(tk.id)}>✕</button>
-              </div>
+              {!selectMode&&(
+                <div style={{display:"flex",gap:6,flexShrink:0}}>
+                  <button className="btn btn-ghost btn-sm" onClick={()=>openEdit(tk)}>{t.btnEdit}</button>
+                  <button className="btn btn-danger" style={{minHeight:36}} onClick={()=>setDelConfirm(tk.id)}>✕</button>
+                </div>
+              )}
             </div>
           );
         })
@@ -1148,6 +1202,26 @@ function AdminTasks({tasks,t,locale,showToast}){
         </div>
       )}
       {delConfirm!==null&&<ConfirmDialog msg={t.confirmDelete} onConfirm={()=>handleDelete(delConfirm)} onCancel={()=>setDelConfirm(null)} t={t}/>}
+
+      {/* Bulk delete confirm */}
+      {bulkDelConfirm&&(
+        <div className="overlay overlay-center" onClick={()=>setBulkDelConfirm(false)}>
+          <div className="dialog scale-in" onClick={e=>e.stopPropagation()}>
+            <div style={{fontSize:32,textAlign:"center",marginBottom:12}}>🗑️</div>
+            <p style={{fontSize:14,textAlign:"center",fontWeight:600,marginBottom:8}}>
+              删除已选 {selectedCount} 个任务？
+            </p>
+            <p style={{fontSize:12,color:"var(--text3)",textAlign:"center",marginBottom:20}}>任务下的所有图片和领取记录将一并删除，不可恢复</p>
+            <div style={{display:"flex",gap:10}}>
+              <button className="btn btn-ghost" style={{flex:1}} onClick={()=>setBulkDelConfirm(false)} disabled={bulkDeleting}>{t.btnCancel}</button>
+              <button className="btn btn-primary" style={{flex:2,background:"var(--danger)",fontWeight:700}} disabled={bulkDeleting}
+                onClick={handleBulkDelete}>
+                {bulkDeleting?"删除中…":"🗑 确认删除"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1453,9 +1527,12 @@ function AdminClaims({tasks,t,locale,showToast}){
 // ─── AdminSubmissions ─────────────────────────────────────────────────────────
 function AdminSubmissions({submissions,tasks,t,locale,showToast}){
   const [delConfirm,setDelConfirm]=useState(null);
-  // workLightbox: { taskId, idx }  — idx is index within that task's image-having subs
   const [workLightbox,setWorkLightbox]=useState(null);
   const [exportOpen,setExportOpen]=useState(false);
+  const [selectMode,setSelectMode]=useState(false);
+  const [selected,setSelected]=useState({});
+  const [bulkDelConfirm,setBulkDelConfirm]=useState(false);
+  const [bulkDeleting,setBulkDeleting]=useState(false);
 
   // Open lightbox for a specific submission, scoped to its task
   const openLightbox=useCallback((s,taskSubs)=>{
@@ -1490,6 +1567,22 @@ function AdminSubmissions({submissions,tasks,t,locale,showToast}){
     try{await deleteDoc(doc(db,'submissions',id));setDelConfirm(null);showToast("✓ 已删除");}
     catch(err){console.error(err);showToast("删除失败","error");}
   },[showToast]);
+
+  const toggleSelect=(id)=>setSelected(prev=>{const n={...prev};if(n[id])delete n[id];else n[id]=true;return n;});
+  const selectedIds=Object.keys(selected);
+  const selectedCount=selectedIds.length;
+
+  const handleBulkDelete=useCallback(async()=>{
+    setBulkDeleting(true);
+    try{
+      for(const id of selectedIds){
+        await deleteDoc(doc(db,'submissions',id));
+      }
+      showToast(`✓ 已删除 ${selectedIds.length} 条记录`);
+      setSelected({});setSelectMode(false);setBulkDelConfirm(false);
+    }catch(err){console.error(err);showToast("批量删除失败","error");}
+    setBulkDeleting(false);
+  },[selectedIds,showToast]);
 
   const toggleTaskExpand=useCallback((id)=>setExpandedTasks(prev=>({...prev,[id]:prev[id]===false?true:false})),[]);
 
@@ -1574,16 +1667,33 @@ function AdminSubmissions({submissions,tasks,t,locale,showToast}){
   return(
     <div>
       {/* Header row */}
-      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:16}}>
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:16,flexWrap:"wrap",gap:10}}>
         <div>
           <div style={{fontSize:16,fontWeight:700}}>{t.adSubmissions}</div>
           <div style={{fontSize:12,color:"var(--text3)",marginTop:2}}>{submissions.length} 条提交记录 · {tasksWithSubs.length} 个任务</div>
         </div>
-        <button className="btn btn-primary btn-sm" onClick={openExport} disabled={submissions.length===0}
-          style={{display:"flex",alignItems:"center",gap:6}}>
-          <span>📊</span> {t.btnExport}
-        </button>
+        <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+          <button className={`btn btn-sm ${selectMode?"btn-primary":""}`} style={{fontSize:12,padding:"5px 12px"}}
+            onClick={()=>{setSelectMode(v=>!v);setSelected({});}}>
+            {selectMode?"退出选择":"批量选择"}
+          </button>
+          <button className="btn btn-primary btn-sm" onClick={openExport} disabled={submissions.length===0}
+            style={{display:"flex",alignItems:"center",gap:6}}>
+            <span>📊</span> {t.btnExport}
+          </button>
+        </div>
       </div>
+
+      {/* Bulk action bar */}
+      {selectMode&&selectedCount>0&&(
+        <div style={{background:"#FFEBEE",border:"1px solid #EF9A9A",borderRadius:10,padding:"10px 14px",marginBottom:12,display:"flex",alignItems:"center",justifyContent:"space-between",gap:8,flexWrap:"wrap"}}>
+          <span style={{fontSize:13,fontWeight:600,color:"var(--danger)"}}>已选 {selectedCount} 条记录</span>
+          <button className="btn btn-sm" style={{background:"var(--danger)",color:"#fff",fontSize:12,fontWeight:700}}
+            onClick={()=>setBulkDelConfirm(true)}>
+            🗑 批量删除
+          </button>
+        </div>
+      )}
 
       {submissions.length===0?<Empty label={t.noData}/>:(
         <div style={{display:"flex",flexDirection:"column",gap:12}}>
@@ -1610,14 +1720,19 @@ function AdminSubmissions({submissions,tasks,t,locale,showToast}){
                 {/* Submission rows */}
                 {isExp&&task.subs.map((s,idx)=>{
                   const claimedPhoto=task.photos.find(p=>p.id===s.claimedPhotoId);
+                  const isSel=!!selected[s.id];
                   return(
-                    <div key={s.id} style={{padding:"12px 16px",borderBottom:idx<task.subs.length-1?"1px solid var(--border)":"none",background:"var(--surface2)"}}>
+                    <div key={s.id} style={{padding:"12px 16px",borderBottom:idx<task.subs.length-1?"1px solid var(--border)":"none",background:isSel?"#FFEBEE":"var(--surface2)",transition:"background .15s"}}>
                       <div style={{display:"flex",alignItems:"flex-start",gap:10,marginBottom:8}}>
+                        {selectMode&&(
+                          <input type="checkbox" checked={isSel} onChange={()=>toggleSelect(s.id)}
+                            style={{width:17,height:17,accentColor:"var(--danger)",flexShrink:0,marginTop:2}}/>
+                        )}
                         <div style={{flex:1,minWidth:0}}>
                           <div style={{fontWeight:600,fontSize:13,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{s.email}</div>
                           <div style={{fontSize:11,color:"var(--text3)",marginTop:1}}>{fmtTime(s.submittedAt)}</div>
                         </div>
-                        <button className="btn btn-danger" style={{minHeight:28,padding:"0 10px",fontSize:11,flexShrink:0}} onClick={()=>setDelConfirm(s.id)}>✕</button>
+                        {!selectMode&&<button className="btn btn-danger" style={{minHeight:28,padding:"0 10px",fontSize:11,flexShrink:0}} onClick={()=>setDelConfirm(s.id)}>✕</button>}
                       </div>
 
                       <div className="info-row">
@@ -1734,6 +1849,26 @@ function AdminSubmissions({submissions,tasks,t,locale,showToast}){
       )}
 
       {delConfirm!==null&&<ConfirmDialog msg={t.confirmDelete} onConfirm={()=>handleDelete(delConfirm)} onCancel={()=>setDelConfirm(null)} t={t}/>}
+
+      {/* Bulk delete confirm */}
+      {bulkDelConfirm&&(
+        <div className="overlay overlay-center" onClick={()=>setBulkDelConfirm(false)}>
+          <div className="dialog scale-in" onClick={e=>e.stopPropagation()}>
+            <div style={{fontSize:32,textAlign:"center",marginBottom:12}}>🗑️</div>
+            <p style={{fontSize:14,textAlign:"center",fontWeight:600,marginBottom:8}}>
+              删除已选 {selectedCount} 条提交记录？
+            </p>
+            <p style={{fontSize:12,color:"var(--text3)",textAlign:"center",marginBottom:20}}>此操作不可恢复</p>
+            <div style={{display:"flex",gap:10}}>
+              <button className="btn btn-ghost" style={{flex:1}} onClick={()=>setBulkDelConfirm(false)} disabled={bulkDeleting}>{t.btnCancel}</button>
+              <button className="btn btn-primary" style={{flex:2,background:"var(--danger)",fontWeight:700}} disabled={bulkDeleting}
+                onClick={handleBulkDelete}>
+                {bulkDeleting?"删除中…":"🗑 确认删除"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {workLightbox&&lbSub&&(
         <div className="overlay" style={{alignItems:"center",background:"rgba(0,0,0,.88)"}}
