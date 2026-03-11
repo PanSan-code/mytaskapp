@@ -1,7 +1,7 @@
 import { useState, useCallback, useRef, useEffect } from "react";
 import * as XLSX from "xlsx";
 import { db, auth } from './firebase.js';
-import { collection, doc, setDoc, updateDoc, deleteDoc, onSnapshot, runTransaction } from 'firebase/firestore';
+import { collection, doc, setDoc, updateDoc, deleteDoc, getDocs, runTransaction } from 'firebase/firestore';
 import { signInWithEmailAndPassword, signOut, onAuthStateChanged } from 'firebase/auth';
 // Cloudinary upload
 
@@ -373,17 +373,33 @@ export default function App() {
     return unsub;
   },[]);
 
-  useEffect(()=>{
-    let first=true;
-    const u1=onSnapshot(collection(db,'tasks'),snap=>{
-      setTasks(snap.docs.map(d=>({id:d.id,...d.data(),photos:d.data().photos||[]})));
-      if(first){setAppLoading(false);first=false;}
-    },err=>{console.error(err);setAppLoading(false);});
-    const u2=onSnapshot(collection(db,'submissions'),snap=>{
-      setSubmissions(snap.docs.map(d=>({id:d.id,...d.data()})));
-    },err=>console.error(err));
-    return()=>{u1();u2();};
+  // ─── 动态轮询策略：操作后立刻刷新，平时30秒轮询 ────────────────────────────
+  const pollTimerRef=useRef(null);
+  const fetchAll=useCallback(async()=>{
+    try{
+      const [taskSnap,subSnap]=await Promise.all([
+        getDocs(collection(db,'tasks')),
+        getDocs(collection(db,'submissions')),
+      ]);
+      setTasks(taskSnap.docs.map(d=>({id:d.id,...d.data(),photos:d.data().photos||[]})));
+      setSubmissions(subSnap.docs.map(d=>({id:d.id,...d.data()})));
+    }catch(err){console.error(err);}
   },[]);
+
+  // 供子组件调用：操作完成后立刻刷新一次，同时重置30秒计时器
+  const refreshNow=useCallback(async()=>{
+    await fetchAll();
+    if(pollTimerRef.current)clearInterval(pollTimerRef.current);
+    pollTimerRef.current=setInterval(fetchAll,30000);
+  },[fetchAll]);
+
+  useEffect(()=>{
+    // 首次加载
+    fetchAll().then(()=>setAppLoading(false));
+    // 启动30秒轮询
+    pollTimerRef.current=setInterval(fetchAll,30000);
+    return()=>{if(pollTimerRef.current)clearInterval(pollTimerRef.current);};
+  },[fetchAll]);
 
   const t=T[locale];
   const allClaims=tasks.flatMap(tk=>(tk.photos||[]).filter(p=>p.claimedBy).map(p=>({...p,taskId:tk.id,taskName:tk.name,taskNameEn:tk.nameEn})));
@@ -442,8 +458,8 @@ export default function App() {
       </header>
 
       {view==="user"
-        ?<UserView tasks={tasks} allClaims={allClaims} userClaims={userClaims} submissions={submissions} userSubmissions={userSubmissions} userEmail={userEmail} setUserEmail={setUserEmail} t={t} locale={locale} showToast={showToast}/>
-        :<AdminView tasks={tasks} allClaims={allClaims} submissions={submissions} t={t} locale={locale} showToast={showToast}/>}
+        ?<UserView tasks={tasks} allClaims={allClaims} userClaims={userClaims} submissions={submissions} userSubmissions={userSubmissions} userEmail={userEmail} setUserEmail={setUserEmail} t={t} locale={locale} showToast={showToast} refreshNow={refreshNow}/>
+        :<AdminView tasks={tasks} allClaims={allClaims} submissions={submissions} t={t} locale={locale} showToast={showToast} refreshNow={refreshNow}/>}
 
       {toast&&<div className={`toast toast-${toast.type}`}>{toast.msg}</div>}
     </div>
@@ -501,7 +517,7 @@ function AdminLogin({t,locale,setLocale,onBack}){
 }
 
 // ─── UserView ─────────────────────────────────────────────────────────────────
-function UserView({tasks,allClaims,userClaims,submissions,userSubmissions,userEmail,setUserEmail,t,locale,showToast}){
+function UserView({tasks,allClaims,userClaims,submissions,userSubmissions,userEmail,setUserEmail,t,locale,showToast,refreshNow}){
   const [tab,setTab]=useState("tasks");
   const [detailId,setDetailId]=useState(null);
   const switchTab=useCallback((k)=>{setTab(k);setDetailId(null);},[]);
@@ -522,13 +538,13 @@ function UserView({tasks,allClaims,userClaims,submissions,userSubmissions,userEm
           )}
           {tab==="tasks"&&detailId&&detailTask?(
             <div className="fade-in">
-              <TaskDetailTab task={detailTask} tasks={tasks} t={t} locale={locale} showToast={showToast} onBack={()=>setDetailId(null)}/>
+              <TaskDetailTab task={detailTask} tasks={tasks} t={t} locale={locale} showToast={showToast} onBack={()=>setDetailId(null)} refreshNow={refreshNow}/>
             </div>
           ):(
             <div className="fade-in" key={tab}>
               {tab==="tasks"&&<TaskListTab tasks={tasks} locale={locale} t={t} onView={setDetailId}/>}
               {tab==="my"&&<MyPhotosTab allClaims={userEmail?userClaims:allClaims} t={t} locale={locale} userEmail={userEmail}/>}
-              {tab==="submit"&&<SubmitTab tasks={tasks} submissions={userEmail?userSubmissions:submissions} userEmail={userEmail} t={t} locale={locale} showToast={showToast}/>}
+              {tab==="submit"&&<SubmitTab tasks={tasks} submissions={userEmail?userSubmissions:submissions} userEmail={userEmail} t={t} locale={locale} showToast={showToast} refreshNow={refreshNow}/>}
             </div>
           )}
         </div>
@@ -631,7 +647,7 @@ function TaskListTab({tasks,locale,t,onView}){
 }
 
 // ─── TaskDetailTab ────────────────────────────────────────────────────────────
-function TaskDetailTab({task,tasks,t,locale,showToast,onBack}){
+function TaskDetailTab({task,tasks,t,locale,showToast,onBack,refreshNow}){
   const [claimTarget,setClaimTarget]=useState(null);
   const [email,setEmail]=useState("");
   const [emailError,setEmailError]=useState("");
@@ -659,6 +675,7 @@ function TaskDetailTab({task,tasks,t,locale,showToast,onBack}){
       });
       setClaimTarget(null);setEmail("");setEmailError("");
       showToast(t.claimSuccess);
+      refreshNow(); // 立刻刷新
     }catch(err){
       console.error(err);
       if(err.message==="ALREADY_CLAIMED")setEmailError("该照片刚刚已被他人领取，请选择其他照片");
@@ -666,7 +683,7 @@ function TaskDetailTab({task,tasks,t,locale,showToast,onBack}){
       else showToast("领取失败，请重试","error");
     }
     setClaiming(false);
-  },[email,claimTarget,task,t,showToast]);
+  },[email,claimTarget,task,t,showToast,refreshNow]);
   const handleDownload=useCallback((p)=>{
     if(p.url){const a=document.createElement("a");a.href=p.url;a.download=p.name;a.click();}
     else showToast(`↓ ${p.name}`);
@@ -767,7 +784,7 @@ function MyPhotosTab({allClaims,t,locale,userEmail}){
 }
 
 // ─── SubmitTab ────────────────────────────────────────────────────────────────
-function SubmitTab({tasks,submissions,userEmail,t,locale,showToast}){
+function SubmitTab({tasks,submissions,userEmail,t,locale,showToast,refreshNow}){
   const [email,setEmail]=useState(userEmail||"");
   const [taskId,setTaskId]=useState("");
   const [phone,setPhone]=useState("");
@@ -817,6 +834,7 @@ function SubmitTab({tasks,submissions,userEmail,t,locale,showToast}){
       });
       setFile(null);setFilePreview(null);setNote("");setPhone("");setPhoneConfirm("");setOrderNo("");setErrors({});
       showToast(t.submitSuccess);
+      refreshNow(); // 立刻刷新
     }catch(err){console.error(err);showToast("提交失败，请重试","error");}
     setSubmitting(false);
   };
@@ -1006,7 +1024,7 @@ function Empty({label}){
 }
 
 // ─── AdminView ────────────────────────────────────────────────────────────────
-function AdminView({tasks,allClaims,submissions,t,locale,showToast}){
+function AdminView({tasks,allClaims,submissions,t,locale,showToast,refreshNow}){
   const [tab,setTab]=useState("overview");
   return(
     <div className="admin-page">
@@ -1022,9 +1040,9 @@ function AdminView({tasks,allClaims,submissions,t,locale,showToast}){
         </div>
         <div className="fade-in" key={tab}>
           {tab==="overview"&&<AdminOverview tasks={tasks} allClaims={allClaims} submissions={submissions} t={t}/>}
-          {tab==="tasks"&&<AdminTasks tasks={tasks} t={t} locale={locale} showToast={showToast}/>}
-          {tab==="claims"&&<AdminClaims tasks={tasks} t={t} locale={locale} showToast={showToast}/>}
-          {tab==="submissions"&&<AdminSubmissions submissions={submissions} tasks={tasks} t={t} locale={locale} showToast={showToast}/>}
+          {tab==="tasks"&&<AdminTasks tasks={tasks} t={t} locale={locale} showToast={showToast} refreshNow={refreshNow}/>}
+          {tab==="claims"&&<AdminClaims tasks={tasks} t={t} locale={locale} showToast={showToast} refreshNow={refreshNow}/>}
+          {tab==="submissions"&&<AdminSubmissions submissions={submissions} tasks={tasks} t={t} locale={locale} showToast={showToast} refreshNow={refreshNow}/>}
         </div>
       </div>
     </div>
@@ -1078,7 +1096,7 @@ function BulkBar({count,label,btnLabel,btnColor="var(--danger)",onAction,onClear
 }
 
 // ─── AdminTasks ───────────────────────────────────────────────────────────────
-function AdminTasks({tasks,t,locale,showToast}){
+function AdminTasks({tasks,t,locale,showToast,refreshNow}){
   const [form,setForm]=useState(null);
   const [delConfirm,setDelConfirm]=useState(null);
   const [search,setSearch]=useState("");
@@ -1122,14 +1140,15 @@ function AdminTasks({tasks,t,locale,showToast}){
       showToast("保存中…");
       await setDoc(doc(db,'tasks',taskId),{name:form.name,nameEn:form.nameEn||'',deadline:form.deadline,desc:form.desc||'',photos},{merge:true});
       setForm(null);showToast("✓ 已保存");
+      refreshNow();
     }catch(err){console.error(err);showToast("保存失败","error");}
     setSaving(false);
-  },[form,showToast]);
+  },[form,showToast,refreshNow]);
 
   const handleDelete=useCallback(async(id)=>{
-    try{await deleteDoc(doc(db,'tasks',id));setDelConfirm(null);showToast("✓ 已删除");}
+    try{await deleteDoc(doc(db,'tasks',id));setDelConfirm(null);showToast("✓ 已删除");refreshNow();}
     catch(err){console.error(err);showToast("删除失败","error");}
-  },[showToast]);
+  },[showToast,refreshNow]);
 
   const handleBulkDelete=useCallback(async()=>{
     setBulkDeleting(true);
@@ -1339,7 +1358,7 @@ function WorkUploadButton({file,filePreview,onSelect,disabled,t}){
 }
 
 // ─── AdminClaims ────────────────────────────────────────────────────────────
-function AdminClaims({tasks,t,locale,showToast}){
+function AdminClaims({tasks,t,locale,showToast,refreshNow}){
   const [search,setSearch]=useState("");
   const [expanded,setExpanded]=useState({});
   const [resetConfirm,setResetConfirm]=useState(null);
@@ -1357,8 +1376,9 @@ function AdminClaims({tasks,t,locale,showToast}){
       const updatedPhotos=(task?.photos||[]).map(p=>p.id===photoId?{...p,claimedBy:null,claimedAt:null}:p);
       await updateDoc(doc(db,'tasks',taskId),{photos:updatedPhotos});
       setResetConfirm(null);showToast(t.resetSuccess);
+      refreshNow();
     }catch(err){console.error(err);showToast("重置失败","error");}
-  },[tasks,t,showToast]);
+  },[tasks,t,showToast,refreshNow]);
 
   const handleBulkReset=useCallback(async()=>{
     setResetting(true);
@@ -1542,7 +1562,7 @@ function AdminClaims({tasks,t,locale,showToast}){
 }
 
 // ─── AdminSubmissions ─────────────────────────────────────────────────────────
-function AdminSubmissions({submissions,tasks,t,locale,showToast}){
+function AdminSubmissions({submissions,tasks,t,locale,showToast,refreshNow}){
   const [delConfirm,setDelConfirm]=useState(null);
   const [workLightbox,setWorkLightbox]=useState(null);
   const [exportOpen,setExportOpen]=useState(false);
@@ -1579,9 +1599,9 @@ function AdminSubmissions({submissions,tasks,t,locale,showToast}){
   });
 
   const handleDelete=useCallback(async(id)=>{
-    try{await deleteDoc(doc(db,'submissions',id));setDelConfirm(null);showToast("✓ 已删除");}
+    try{await deleteDoc(doc(db,'submissions',id));setDelConfirm(null);showToast("✓ 已删除");refreshNow();}
     catch(err){console.error(err);showToast("删除失败","error");}
-  },[showToast]);
+  },[showToast,refreshNow]);
 
   const toggleSelect=(id)=>setSelected(prev=>{const n={...prev};if(n[id])delete n[id];else n[id]=true;return n;});
   const selectedIds=Object.keys(selected);
